@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.log
+*.pt
+*.pth
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*_focus.mp4
+build/
+dist/
+*.egg-info/
