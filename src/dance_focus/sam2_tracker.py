@@ -82,7 +82,7 @@ def ensure_checkpoint(progress: Callable[[int], None] | None = None) -> Path:
     verified.unlink(missing_ok=True)
     partial = checkpoint.with_suffix(".part")
     partial.unlink(missing_ok=True)
-    request = Request(MODEL_URL, headers={"User-Agent": "Dance-Focus/0.2"})
+    request = Request(MODEL_URL, headers={"User-Agent": "Dance-Focus/0.4"})
     downloaded = 0
     try:
         with urlopen(request, timeout=60) as response, partial.open("wb") as output:
@@ -246,6 +246,140 @@ def _mask_box(mask_logits) -> tuple[Box | None, np.ndarray]:
     return Box(left, top, right - left + 1, bottom - top + 1), cpu_mask
 
 
+def _track_range(
+    predictor,
+    device: str,
+    frames_dir: Path,
+    start_frame: int,
+    end_frame: int,
+    initial_box: Box,
+    progress: Callable[[int], None] | None,
+    cancelled: Callable[[], bool] | None,
+    chunk_frames: int,
+    overlap_frames: int,
+) -> list[Box | None]:
+    import torch
+
+    boxes: list[Box | None] = [None] * (end_frame - start_frame)
+    start = start_frame
+    covered_until = start_frame
+    processed_until = start_frame
+    seed_mask: np.ndarray | None = None
+    overlap_frames = max(1, min(overlap_frames, chunk_frames - 1))
+
+    while start < end_frame:
+        if cancelled and cancelled():
+            raise InterruptedError("操作已取消")
+        end = min(start + chunk_frames, end_frame)
+        next_start = end - overlap_frames if end < end_frame else None
+        chunk_dir = _chunk_directory(frames_dir, start, end)
+        context = (
+            torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+            if device == "cuda"
+            else nullcontext()
+        )
+        next_seed: np.ndarray | None = None
+        with context:
+            state = predictor.init_state(
+                video_path=str(chunk_dir),
+                offload_video_to_cpu=True,
+                offload_state_to_cpu=True,
+                async_loading_frames=False,
+            )
+            if seed_mask is not None:
+                predictor.add_new_mask(state, frame_idx=0, obj_id=1, mask=seed_mask)
+            else:
+                prompt = np.asarray(
+                    [
+                        initial_box.x,
+                        initial_box.y,
+                        initial_box.right,
+                        initial_box.bottom,
+                    ],
+                    dtype=np.float32,
+                )
+                predictor.add_new_points_or_box(
+                    state,
+                    frame_idx=0,
+                    obj_id=1,
+                    box=prompt,
+                )
+
+            for local_index, _, mask_logits in predictor.propagate_in_video(state):
+                if cancelled and cancelled():
+                    raise InterruptedError("操作已取消")
+                global_index = start + local_index
+                box, mask = _mask_box(mask_logits)
+                if global_index >= covered_until:
+                    boxes[global_index - start_frame] = box
+                if next_start is not None and global_index == next_start:
+                    next_seed = mask
+                processed_until = max(processed_until, global_index + 1)
+                if progress:
+                    progress(
+                        round(
+                            (processed_until - start_frame)
+                            * 100
+                            / (end_frame - start_frame)
+                        )
+                    )
+
+        del state
+        gc.collect()
+        if device == "cuda":
+            torch.cuda.empty_cache()
+        if end >= end_frame:
+            break
+        if next_seed is None:
+            raise RuntimeError("SAM 2 无法生成下一段的衔接掩码")
+        seed_mask = next_seed
+        covered_until = end
+        start = next_start
+
+    boxes[0] = initial_box
+    if progress:
+        progress(100)
+    return boxes
+
+
+def track_subject_interval(
+    info: VideoInfo,
+    start_frame: int,
+    end_frame: int,
+    initial_box: Box,
+    progress: Callable[[int], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    chunk_frames: int = DEFAULT_CHUNK_FRAMES,
+    overlap_frames: int = DEFAULT_OVERLAP_FRAMES,
+) -> list[Box | None]:
+    if not 0 <= start_frame < end_frame <= info.frame_count:
+        raise ValueError("局部跟踪区间超出视频范围")
+    if chunk_frames <= overlap_frames:
+        raise ValueError("分段帧数必须大于重叠帧数")
+
+    frames_dir = _extract_frames(
+        info,
+        (lambda value: progress(round(value * 0.2))) if progress else None,
+        cancelled,
+    )
+    checkpoint = ensure_checkpoint(
+        (lambda value: progress(20 + round(value * 0.1))) if progress else None
+    )
+    predictor, device = _get_model(checkpoint)
+    return _track_range(
+        predictor,
+        device,
+        frames_dir,
+        start_frame,
+        end_frame,
+        initial_box,
+        (lambda value: progress(30 + round(value * 0.7))) if progress else None,
+        cancelled,
+        chunk_frames,
+        overlap_frames,
+    )
+
+
 def track_subject(
     info: VideoInfo,
     keyframes: Mapping[int, Box],
@@ -258,6 +392,8 @@ def track_subject(
         raise ValueError("请先在第一帧完整框选自己")
     if chunk_frames <= overlap_frames:
         raise ValueError("分段帧数必须大于重叠帧数")
+    if any(not 0 <= index < info.frame_count for index in keyframes):
+        raise ValueError("人物修正帧超出视频范围")
 
     def extraction_progress(value: int) -> None:
         if progress:
@@ -276,71 +412,35 @@ def track_subject(
     if progress:
         progress(35)
 
-    import torch
-
     boxes: list[Box | None] = [None] * info.frame_count
-    start = 0
-    covered_until = 0
-    seed_mask: np.ndarray | None = None
-    overlap_frames = max(1, min(overlap_frames, chunk_frames - 1))
-
-    while start < info.frame_count:
-        if cancelled and cancelled():
-            raise InterruptedError("操作已取消")
-        end = min(start + chunk_frames, info.frame_count)
-        next_start = end - overlap_frames if end < info.frame_count else None
-        chunk_dir = _chunk_directory(frames_dir, start, end)
-        context = (
-            torch.autocast(device_type="cuda", dtype=torch.bfloat16)
-            if device == "cuda"
-            else nullcontext()
+    prompt_indices = sorted(keyframes)
+    completed = 0
+    for position, start in enumerate(prompt_indices):
+        end = (
+            prompt_indices[position + 1]
+            if position + 1 < len(prompt_indices)
+            else info.frame_count
         )
-        next_seed: np.ndarray | None = None
-        with context:
-            state = predictor.init_state(
-                video_path=str(chunk_dir),
-                offload_video_to_cpu=True,
-                offload_state_to_cpu=True,
-                async_loading_frames=False,
-            )
-            if seed_mask is not None:
-                predictor.add_new_mask(state, frame_idx=0, obj_id=1, mask=seed_mask)
+        interval_length = end - start
 
-            for global_index, box in sorted(keyframes.items()):
-                if start <= global_index < end:
-                    local_index = global_index - start
-                    prompt = np.asarray(
-                        [box.x, box.y, box.right, box.bottom], dtype=np.float32
-                    )
-                    predictor.add_new_points_or_box(
-                        state,
-                        frame_idx=local_index,
-                        obj_id=1,
-                        box=prompt,
-                    )
+        def interval_progress(value: int) -> None:
+            if progress:
+                done = completed + interval_length * value / 100
+                progress(35 + round(done * 65 / info.frame_count))
 
-            for local_index, _, mask_logits in predictor.propagate_in_video(state):
-                global_index = start + local_index
-                box, mask = _mask_box(mask_logits)
-                if global_index >= covered_until:
-                    boxes[global_index] = box
-                if next_start is not None and global_index == next_start:
-                    next_seed = mask
-                if progress:
-                    processed = max(covered_until, global_index + 1)
-                    progress(35 + round(processed * 65 / info.frame_count))
-
-        del state
-        gc.collect()
-        if device == "cuda":
-            torch.cuda.empty_cache()
-        if end >= info.frame_count:
-            break
-        if next_seed is None:
-            raise RuntimeError("SAM 2 无法生成下一段的衔接掩码")
-        seed_mask = next_seed
-        covered_until = end
-        start = next_start
+        boxes[start:end] = _track_range(
+            predictor,
+            device,
+            frames_dir,
+            start,
+            end,
+            keyframes[start],
+            interval_progress,
+            cancelled,
+            chunk_frames,
+            overlap_frames,
+        )
+        completed += interval_length
 
     if progress:
         progress(100)

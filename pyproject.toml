@@ -1,7 +1,7 @@
 [project]
 name = "dance-focus"
-version = "0.2.0"
-description = "SAM 2 powered Linux desktop tool for reframing dance videos around a selected dancer"
+version = "0.4.0"
+description = "Pose and ReID aware Linux desktop tool for reframing dance videos"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [

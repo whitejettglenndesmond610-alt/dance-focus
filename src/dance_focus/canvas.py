@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import cv2
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen
+from PySide6.QtCore import QLineF, QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QImage,
+    QLinearGradient,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPen,
+)
 from PySide6.QtWidgets import QWidget
 
-from dance_focus.geometry import Box, CropRect
+from dance_focus.geometry import Box, CropRect, PoseAnchor
 
 
 class VideoCanvas(QWidget):
@@ -19,20 +28,31 @@ class VideoCanvas(QWidget):
         self._image: QImage | None = None
         self._target_box: Box | None = None
         self._crop_rect: CropRect | None = None
+        self._pose_anchor: PoseAnchor | None = None
         self._crop_preview = False
         self._drag_start: QPointF | None = None
         self._drag_end: QPointF | None = None
 
     def set_crop_preview(self, enabled: bool) -> None:
         self._crop_preview = enabled
+        self.setCursor(
+            Qt.CursorShape.ArrowCursor
+            if enabled
+            else Qt.CursorShape.CrossCursor
+        )
         self.update()
 
     def set_frame(
-        self, frame, target_box: Box | None = None, crop_rect: CropRect | None = None
+        self,
+        frame,
+        target_box: Box | None = None,
+        crop_rect: CropRect | None = None,
+        pose_anchor: PoseAnchor | None = None,
     ) -> None:
         self._frame = frame
         self._target_box = target_box
         self._crop_rect = crop_rect
+        self._pose_anchor = pose_anchor
         if frame is None:
             self._image = None
         else:
@@ -104,14 +124,25 @@ class VideoCanvas(QWidget):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#0c0d10"))
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        background = QLinearGradient(0, 0, 0, self.height())
+        background.setColorAt(0, QColor("#090b0e"))
+        background.setColorAt(1, QColor("#0c0f13"))
+        painter.fillRect(self.rect(), background)
         if self._image is None:
-            painter.setPen(QColor("#737782"))
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "打开一个舞蹈视频")
+            self._paint_empty_state(painter)
             return
 
         image_rect = self._image_rect()
+        frame_path = QPainterPath()
+        frame_path.addRoundedRect(image_rect, 8, 8)
+        painter.save()
+        painter.setClipPath(frame_path)
         painter.drawImage(image_rect, self._image, self._source_rect())
+        painter.restore()
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor("#2a3038"), 1))
+        painter.drawRoundedRect(image_rect, 8, 8)
 
         if self._crop_rect is not None and not self._crop_preview:
             crop = self._to_widget_rect(
@@ -155,10 +186,44 @@ class VideoCanvas(QWidget):
                     crop.height(),
                 )
             )
+            painter.setClipRect(crop)
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(QColor("#f4c95d"), 2))
-            painter.drawRect(crop)
+            painter.setPen(QPen(QColor(217, 255, 87, 82), 1))
+            painter.drawLine(
+                QLineF(
+                    crop.left() + crop.width() / 3,
+                    crop.top(),
+                    crop.left() + crop.width() / 3,
+                    crop.bottom(),
+                )
+            )
+            painter.drawLine(
+                QLineF(
+                    crop.left() + crop.width() * 2 / 3,
+                    crop.top(),
+                    crop.left() + crop.width() * 2 / 3,
+                    crop.bottom(),
+                )
+            )
+            painter.drawLine(
+                QLineF(
+                    crop.left(),
+                    crop.top() + crop.height() / 3,
+                    crop.right(),
+                    crop.top() + crop.height() / 3,
+                )
+            )
+            painter.drawLine(
+                QLineF(
+                    crop.left(),
+                    crop.top() + crop.height() * 2 / 3,
+                    crop.right(),
+                    crop.top() + crop.height() * 2 / 3,
+                )
+            )
             painter.restore()
+            self._draw_corner_frame(painter, crop, QColor("#d9ff57"), 2.2, 20)
+            self._draw_crop_label(painter, crop)
 
         if self._target_box is not None and not self._crop_preview:
             painter.save()
@@ -169,9 +234,27 @@ class VideoCanvas(QWidget):
                 self._target_box.width,
                 self._target_box.height,
             )
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(QColor("#65d6ad"), 2))
-            painter.drawRect(target)
+            painter.setBrush(QColor(103, 209, 255, 16))
+            painter.setPen(QPen(QColor(103, 209, 255, 74), 1))
+            painter.drawRoundedRect(target, 3, 3)
+            painter.restore()
+            self._draw_corner_frame(painter, target, QColor("#67d1ff"), 2.0, 14)
+
+        if self._pose_anchor is not None and not self._crop_preview:
+            anchor = self._to_widget_rect(
+                self._pose_anchor.point.x,
+                self._pose_anchor.point.y,
+                0,
+                0,
+            ).topLeft()
+            painter.save()
+            painter.setPen(QPen(QColor("#d9ff57"), 1.5))
+            painter.setBrush(QColor(9, 12, 14, 210))
+            painter.drawEllipse(anchor, 7, 7)
+            painter.drawLine(QLineF(anchor.x() - 12, anchor.y(), anchor.x() - 5, anchor.y()))
+            painter.drawLine(QLineF(anchor.x() + 5, anchor.y(), anchor.x() + 12, anchor.y()))
+            painter.drawLine(QLineF(anchor.x(), anchor.y() - 12, anchor.x(), anchor.y() - 5))
+            painter.drawLine(QLineF(anchor.x(), anchor.y() + 5, anchor.x(), anchor.y() + 12))
             painter.restore()
 
         if self._drag_start is not None and self._drag_end is not None:
@@ -180,13 +263,101 @@ class VideoCanvas(QWidget):
             start = self._to_widget_rect(self._drag_start.x(), self._drag_start.y(), 0, 0)
             end = self._to_widget_rect(self._drag_end.x(), self._drag_end.y(), 0, 0)
             selection = QRectF(start.topLeft(), end.topLeft()).normalized()
-            painter.setBrush(QColor(101, 214, 173, 45))
-            painter.setPen(QPen(QColor("#65d6ad"), 2, Qt.PenStyle.DashLine))
-            painter.drawRect(selection)
+            painter.setBrush(QColor(217, 255, 87, 28))
+            painter.setPen(QPen(QColor(217, 255, 87, 120), 1, Qt.PenStyle.DashLine))
+            painter.drawRoundedRect(selection, 3, 3)
             painter.restore()
+            self._draw_corner_frame(painter, selection, QColor("#d9ff57"), 2.0, 14)
+
+    def _paint_empty_state(self, painter: QPainter) -> None:
+        safe = QRectF(self.rect()).adjusted(42, 42, -42, -42)
+        painter.setPen(QPen(QColor(38, 44, 52, 135), 1, Qt.PenStyle.DotLine))
+        for fraction in (1 / 3, 2 / 3):
+            painter.drawLine(
+                QLineF(
+                    safe.left() + safe.width() * fraction,
+                    safe.top(),
+                    safe.left() + safe.width() * fraction,
+                    safe.bottom(),
+                )
+            )
+            painter.drawLine(
+                QLineF(
+                    safe.left(),
+                    safe.top() + safe.height() * fraction,
+                    safe.right(),
+                    safe.top() + safe.height() * fraction,
+                )
+            )
+
+        center = safe.center()
+        painter.setBrush(QColor("#11161b"))
+        painter.setPen(QPen(QColor("#303741"), 1))
+        painter.drawEllipse(center, 31, 31)
+        painter.setPen(QPen(QColor("#d9ff57"), 2))
+        painter.drawLine(QLineF(center.x() - 10, center.y(), center.x() + 10, center.y()))
+        painter.drawLine(QLineF(center.x(), center.y() - 10, center.x(), center.y() + 10))
+
+        title_rect = QRectF(center.x() - 180, center.y() + 46, 360, 26)
+        font = painter.font()
+        font.setPixelSize(14)
+        font.setWeight(QFont.Weight.Bold)
+        painter.setFont(font)
+        painter.setPen(QColor("#dfe3e8"))
+        painter.drawText(title_rect, Qt.AlignmentFlag.AlignCenter, "导入一段舞蹈视频")
+        copy_rect = QRectF(center.x() - 220, center.y() + 72, 440, 24)
+        font.setPixelSize(11)
+        font.setWeight(QFont.Weight.Normal)
+        painter.setFont(font)
+        painter.setPen(QColor("#66707c"))
+        painter.drawText(
+            copy_rect,
+            Qt.AlignmentFlag.AlignCenter,
+            "支持 MP4 · MOV · MKV · HEVC，跟踪完成后可实时预览动态裁剪",
+        )
+        self._draw_corner_frame(painter, safe, QColor("#252b33"), 1.2, 24)
+
+    @staticmethod
+    def _draw_corner_frame(
+        painter: QPainter,
+        rect: QRectF,
+        color: QColor,
+        width: float,
+        length: float,
+    ) -> None:
+        if rect.width() <= 1 or rect.height() <= 1:
+            return
+        length = min(length, rect.width() / 3, rect.height() / 3)
+        painter.save()
+        painter.setPen(QPen(color, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.SquareCap))
+        for x, x_direction in ((rect.left(), 1), (rect.right(), -1)):
+            for y, y_direction in ((rect.top(), 1), (rect.bottom(), -1)):
+                painter.drawLine(QLineF(x, y, x + length * x_direction, y))
+                painter.drawLine(QLineF(x, y, x, y + length * y_direction))
+        painter.restore()
+
+    @staticmethod
+    def _draw_crop_label(painter: QPainter, crop: QRectF) -> None:
+        label = "DYNAMIC CROP"
+        font = painter.font()
+        font.setPixelSize(9)
+        font.setWeight(QFont.Weight.ExtraBold)
+        painter.setFont(font)
+        text_width = painter.fontMetrics().horizontalAdvance(label)
+        label_rect = QRectF(
+            crop.left() + 8,
+            crop.top() + 8,
+            text_width + 18,
+            23,
+        )
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(10, 13, 12, 220))
+        painter.drawRoundedRect(label_rect, 6, 6)
+        painter.setPen(QColor("#d9ff57"))
+        painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, label)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        if event.button() != Qt.MouseButton.LeftButton:
+        if self._crop_preview or event.button() != Qt.MouseButton.LeftButton:
             return
         point = self._to_frame_point(event.position())
         if point is not None:
@@ -195,7 +366,7 @@ class VideoCanvas(QWidget):
             self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        if self._drag_start is None:
+        if self._crop_preview or self._drag_start is None:
             return
         point = self._to_frame_point(event.position())
         if point is not None:
@@ -203,7 +374,7 @@ class VideoCanvas(QWidget):
             self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        if self._drag_start is None or self._drag_end is None:
+        if self._crop_preview or self._drag_start is None or self._drag_end is None:
             return
         start, end = self._drag_start, self._drag_end
         self._drag_start = None

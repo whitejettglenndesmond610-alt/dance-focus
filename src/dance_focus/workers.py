@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import logging
+import threading
 from typing import Any
 
 from PySide6.QtCore import QObject, QRunnable, Signal, Slot
@@ -21,6 +22,10 @@ class FunctionWorker(QRunnable):
         self.args = args
         self.kwargs = kwargs
         self.signals = WorkerSignals()
+        self._cancelled = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancelled.set()
 
     @Slot()
     def run(self) -> None:
@@ -28,6 +33,7 @@ class FunctionWorker(QRunnable):
             result = self.function(
                 *self.args,
                 progress=self.signals.progress.emit,
+                cancelled=self._cancelled.is_set,
                 **self.kwargs,
             )
         except Exception as error:
