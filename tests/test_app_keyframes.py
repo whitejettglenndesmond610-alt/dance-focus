@@ -10,9 +10,17 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from dance_focus.app import MainWindow
+from dance_focus.exporter import (
+    ExportFrameRate,
+    ExportQuality,
+    ExportResolution,
+    ExportSettings,
+)
 from dance_focus.geometry import (
     Box,
     CameraKeyframe,
+    CameraPath,
+    CropRect,
     Point,
     PoseAnchor,
     TrackSample,
@@ -138,6 +146,69 @@ def test_reset_buttons_restore_framing_and_keyframe_defaults(app, tmp_path):
     assert window.keyframe_y_slider.value() == 0
     assert window.keyframe_zoom_slider.value() == 100
     assert window.keyframe_follow_slider.value() == 100
+    window.project_document = None
+    window.close()
+
+
+def test_inspector_uses_stages_and_collapses_advanced_controls(app, tmp_path):
+    window = MainWindow()
+    window.project_store = ProjectStore(tmp_path / "state")
+
+    assert not window.media_card.isHidden()
+    assert not window.tracking_card.isHidden()
+    assert window.framing_card.isHidden()
+    assert window.output_card.isHidden()
+    assert window.advanced_panel.isHidden()
+    assert not window.inspector_tabs.isItemEnabled(1)
+    assert not window.inspector_tabs.isItemEnabled(2)
+
+    window.inspector_tabs.setCurrentIndex(1)
+    assert window.media_card.isHidden()
+    assert not window.framing_card.isHidden()
+    assert window.output_card.isHidden()
+
+    window.advanced_button.click()
+    assert not window.advanced_panel.isHidden()
+    assert window.advanced_button.text() == "收起高级调整"
+
+    window.inspector_tabs.setCurrentIndex(2)
+    assert window.framing_card.isHidden()
+    assert not window.output_card.isHidden()
+    assert window.status_card.parent() is window.inspector
+
+    window.project_document = None
+    window.close()
+
+
+def test_export_controls_build_settings_and_output_summary(app, tmp_path):
+    window = MainWindow()
+    window.project_store = ProjectStore(tmp_path / "state")
+    window.video_info = VideoInfo(Path("/tmp/export.mp4"), 1920, 1080, 24, 2)
+    window.camera_path = CameraPath(
+        (608, 1080),
+        (CropRect(0, 0, 608, 1080), CropRect(0, 0, 608, 1080)),
+    )
+
+    window.export_quality_combo.setCurrentIndex(1)
+    window.export_resolution_combo.setCurrentIndex(2)
+    window.export_frame_rate_combo.setCurrentIndex(2)
+    window.interpolation_combo.setCurrentIndex(1)
+
+    assert window._export_settings() == ExportSettings(
+        ExportQuality.STANDARD,
+        ExportResolution.P1080,
+        ExportFrameRate.FPS_60,
+        True,
+    )
+    assert not window.interpolation_row.isHidden()
+    assert "1080 × 1920" in window.export_summary.text()
+    assert "60.00 FPS" in window.export_summary.text()
+    assert "运动插帧" in window.export_summary.text()
+    assert "高质量放大" in window.export_summary.text()
+    window.preview_combo.setCurrentIndex(1)
+    assert "预览 24.00 FPS" in window.video_meta_label.text()
+    assert "导出 1080×1920 · 60.00 FPS" in window.video_meta_label.text()
+
     window.project_document = None
     window.close()
 

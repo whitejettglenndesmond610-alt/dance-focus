@@ -51,12 +51,12 @@ class MotionButton(QPushButton):
         self._animation.setDuration(170)
         self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumHeight(43)
+        self.setMinimumHeight(38)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
 
     def sizeHint(self) -> QSize:
         hint = super().sizeHint()
-        return QSize(max(hint.width() + 28, 112), max(hint.height(), 43))
+        return QSize(max(hint.width() + 24, 96), max(hint.height(), 38))
 
     def get_hover_progress(self) -> float:
         return self._hover_progress
@@ -93,26 +93,26 @@ class MotionButton(QPushButton):
             progress = 0.45
 
         if self.role == "accent":
-            background = _mix(QColor("#d9ff57"), QColor("#edff9b"), progress)
-            foreground = QColor("#0a0d0c")
-            border = _mix(QColor("#d9ff57"), QColor("#f5ffc8"), progress)
+            background = _mix(QColor("#42bd91"), QColor("#55cba1"), progress)
+            foreground = QColor("#ffffff")
+            border = _mix(QColor("#42bd91"), QColor("#269e75"), progress)
         elif self.role == "ghost":
-            background = _mix(QColor(20, 23, 28, 0), QColor("#20252d"), progress)
-            foreground = _mix(QColor("#8e96a3"), QColor("#f5f7fa"), progress)
-            border = _mix(QColor("#2b3038"), QColor("#4a5360"), progress)
+            background = _mix(QColor(255, 255, 255, 0), QColor("#edf7f3"), progress)
+            foreground = _mix(QColor("#65766f"), QColor("#268763"), progress)
+            border = _mix(QColor("#d7e4df"), QColor("#b9d8cc"), progress)
         else:
-            background = _mix(QColor("#171b21"), QColor("#252b34"), progress)
-            foreground = _mix(QColor("#d7dbe2"), QColor("#ffffff"), progress)
-            border = _mix(QColor("#303640"), QColor("#56606e"), progress)
+            background = _mix(QColor("#ffffff"), QColor("#eef8f4"), progress)
+            foreground = _mix(QColor("#344840"), QColor("#21815f"), progress)
+            border = _mix(QColor("#d4e2dd"), QColor("#a9d2c2"), progress)
 
         if not self.isEnabled():
-            background.setAlpha(90)
-            foreground = QColor("#626975")
-            border = QColor("#252a31")
+            background = QColor("#f0f3f2")
+            foreground = QColor("#a9b3af")
+            border = QColor("#e1e7e4")
 
         painter.setPen(QPen(border, 1))
         painter.setBrush(background)
-        painter.drawRoundedRect(rect, 10, 10)
+        painter.drawRoundedRect(rect, 9, 9)
         painter.setPen(foreground)
         font = self.font()
         font.setWeight(QFont.Weight.DemiBold)
@@ -121,7 +121,7 @@ class MotionButton(QPushButton):
 
         if self.hasFocus():
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(QColor("#d9ff57"), 1))
+            painter.setPen(QPen(QColor("#42bd91"), 1))
             painter.drawRoundedRect(rect.adjusted(2, 2, -2, -2), 8, 8)
 
 
@@ -132,7 +132,7 @@ class SegmentedControl(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("segmentedControl")
-        self.setFixedHeight(40)
+        self.setFixedHeight(36)
         self._buttons: list[QToolButton] = []
         self._data: list[object] = []
         self._current_index = -1
@@ -181,6 +181,13 @@ class SegmentedControl(QFrame):
     def currentIndex(self) -> int:
         return self._current_index
 
+    def setItemEnabled(self, index: int, enabled: bool) -> None:
+        if 0 <= index < len(self._buttons):
+            self._buttons[index].setEnabled(enabled)
+
+    def isItemEnabled(self, index: int) -> bool:
+        return 0 <= index < len(self._buttons) and self._buttons[index].isEnabled()
+
     def setCurrentIndex(self, index: int) -> None:
         if not 0 <= index < len(self._buttons):
             return
@@ -226,7 +233,7 @@ class WorkflowIndicator(QWidget):
         self._animation = QPropertyAnimation(self, b"progress", self)
         self._animation.setDuration(360)
         self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self.setFixedHeight(66)
+        self.setFixedHeight(54)
 
     def get_progress(self) -> float:
         return self._progress
@@ -255,28 +262,28 @@ class WorkflowIndicator(QWidget):
         if count < 2:
             return
         margin = 18.0
-        top = 17.0
+        top = 14.0
         spacing = (self.width() - margin * 2) / (count - 1)
         points = [margin + spacing * index for index in range(count)]
 
-        painter.setPen(QPen(QColor("#2a3038"), 2))
+        painter.setPen(QPen(QColor("#d7e4df"), 2))
         painter.drawLine(QLineF(points[0], top, points[-1], top))
         progress_x = points[0] + spacing * self._progress
-        painter.setPen(QPen(QColor("#d9ff57"), 2))
+        painter.setPen(QPen(QColor("#42bd91"), 2))
         painter.drawLine(QLineF(points[0], top, min(progress_x, points[-1]), top))
 
         for index, (x, label) in enumerate(zip(points, self.labels, strict=True)):
             completed = self._progress + 0.02 >= index
             active = index == self._step
-            painter.setPen(QPen(QColor("#d9ff57") if completed else QColor("#3a414b"), 2))
+            painter.setPen(QPen(QColor("#42bd91") if completed else QColor("#c7d6d0"), 2))
             painter.setBrush(
-                QColor("#d9ff57")
+                QColor("#42bd91")
                 if completed
-                else QColor("#11151a")
+                else QColor("#ffffff")
             )
             radius = 6.5 if active else 5.0
             painter.drawEllipse(QRectF(x - radius, top - radius, radius * 2, radius * 2))
-            painter.setPen(QColor("#eef1f5") if active else QColor("#747d89"))
+            painter.setPen(QColor("#24362f") if active else QColor("#7a8b85"))
             font = self.font()
             font.setPixelSize(10)
             font.setWeight(
@@ -284,7 +291,7 @@ class WorkflowIndicator(QWidget):
             )
             painter.setFont(font)
             painter.drawText(
-                QRectF(x - spacing / 2, 34, spacing, 22),
+                QRectF(x - spacing / 2, 29, spacing, 20),
                 Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
                 label,
             )
@@ -380,9 +387,9 @@ class ConfidenceTimeline(QSlider):
             zip(self._quality, self._states, strict=True)
         ):
             if state == "lost" or quality < 0.20:
-                color = QColor("#ff5c69")
+                color = QColor("#e85f69")
             elif state in {"occluded", "reidentified"} or quality < 0.48:
-                color = QColor("#ffb454")
+                color = QColor("#e9a347")
             else:
                 continue
             x = left + usable * (index - self.minimum()) / denominator
@@ -390,14 +397,14 @@ class ConfidenceTimeline(QSlider):
             painter.drawLine(QLineF(x, marker_top, x, marker_bottom))
 
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#67d1ff"))
+        painter.setBrush(QColor("#458fdd"))
         for frame_index in self._keyframes:
             if not self.minimum() <= frame_index <= self.maximum():
                 continue
             x = left + usable * (frame_index - self.minimum()) / denominator
             painter.drawEllipse(QRectF(x - 2.5, self.height() - 5.5, 5, 5))
 
-        painter.setBrush(QColor("#62e6c8"))
+        painter.setBrush(QColor("#32ac83"))
         for frame_index in self._subject_corrections:
             if not self.minimum() <= frame_index <= self.maximum():
                 continue

@@ -10,7 +10,7 @@ configure_native_threads()
 
 import cv2
 from PySide6.QtCore import QThreadPool, QTimer, Qt, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QKeySequence, QPalette
+from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
@@ -35,7 +35,15 @@ from dance_focus.analysis_process import (
 )
 from dance_focus.canvas import VideoCanvas
 from dance_focus.diagnostics import configure_logging, log_path
-from dance_focus.exporter import export_video
+from dance_focus.exporter import (
+    ExportFrameRate,
+    ExportQuality,
+    ExportResolution,
+    ExportSettings,
+    export_video,
+    output_frame_rate,
+    resolve_output_size,
+)
 from dance_focus.geometry import (
     Box,
     CameraKeyframe,
@@ -54,7 +62,7 @@ from dance_focus.project import (
     source_ref,
     subject_prompt_hash,
 )
-from dance_focus.sam2_tracker import cached_frames_dir, runtime_description
+from dance_focus.sam2_tracker import runtime_description
 from dance_focus.theme import APP_STYLESHEET
 from dance_focus.ui_components import (
     AnimatedStatusLabel,
@@ -72,7 +80,7 @@ from dance_focus.workers import FunctionWorker
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Dance Focus · AI Reframe Studio")
+        self.setWindowTitle("Dance Focus")
         self.resize(1440, 900)
         self.setMinimumSize(1120, 720)
 
@@ -129,15 +137,15 @@ class MainWindow(QMainWindow):
         root = QWidget()
         root.setObjectName("appRoot")
         root_layout = QVBoxLayout(root)
-        root_layout.setContentsMargins(18, 18, 18, 18)
-        root_layout.setSpacing(14)
+        root_layout.setContentsMargins(16, 16, 16, 16)
+        root_layout.setSpacing(12)
 
         self.top_bar = self._build_top_bar()
         self.stage_card = self._build_stage()
         self.inspector = self._build_inspector()
 
         body = QHBoxLayout()
-        body.setSpacing(14)
+        body.setSpacing(12)
         body.addWidget(self.stage_card, 1)
         body.addWidget(self.inspector)
 
@@ -148,7 +156,7 @@ class MainWindow(QMainWindow):
     def _build_top_bar(self) -> QFrame:
         bar = QFrame()
         bar.setObjectName("topBar")
-        bar.setFixedHeight(68)
+        bar.setFixedHeight(62)
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(14, 10, 14, 10)
         layout.setSpacing(12)
@@ -160,21 +168,23 @@ class MainWindow(QMainWindow):
 
         brand = QVBoxLayout()
         brand.setSpacing(0)
-        brand_title = QLabel("DANCE FOCUS")
+        brand_title = QLabel("Dance Focus")
         brand_title.setObjectName("brandTitle")
-        brand_subtitle = QLabel("SAM 2 · AI REFRAME STUDIO")
+        brand_subtitle = QLabel("智能舞蹈跟拍")
         brand_subtitle.setObjectName("eyebrow")
         brand.addWidget(brand_title)
         brand.addWidget(brand_subtitle)
 
-        self.project_label = QLabel("NO CLIP LOADED")
+        self.project_label = QLabel("尚未导入视频")
         self.project_label.setObjectName("projectName")
         self.project_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        runtime = runtime_description().replace(" · ", "  /  ")
+        runtime_detail = runtime_description()
+        runtime = "SAM 2 · GPU 加速" if "GPU" in runtime_detail else "SAM 2 · CPU"
         runtime_chip = QLabel(runtime)
         runtime_chip.setObjectName("runtimeChip")
         runtime_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        runtime_chip.setToolTip(runtime_detail)
 
         layout.addWidget(mark)
         layout.addLayout(brand)
@@ -194,17 +204,11 @@ class MainWindow(QMainWindow):
         header = QFrame()
         header.setObjectName("monitorHeader")
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(18, 13, 18, 11)
+        header_layout.setContentsMargins(16, 11, 16, 10)
         header_layout.setSpacing(12)
 
-        title_stack = QVBoxLayout()
-        title_stack.setSpacing(1)
-        eyebrow = QLabel("PROGRAM MONITOR")
-        eyebrow.setObjectName("eyebrow")
-        monitor_title = QLabel("动态构图监看器")
+        monitor_title = QLabel("画面预览")
         monitor_title.setObjectName("panelTitle")
-        title_stack.addWidget(eyebrow)
-        title_stack.addWidget(monitor_title)
 
         self.video_meta_label = QLabel("— × —  /  — FPS")
         self.video_meta_label.setObjectName("videoMeta")
@@ -212,10 +216,13 @@ class MainWindow(QMainWindow):
         self.preview_combo = SegmentedControl()
         self.preview_combo.setFixedWidth(220)
         self.preview_combo.addItem("原始画面", "source")
-        self.preview_combo.addItem("成片预览", "crop")
+        self.preview_combo.addItem("构图预览", "crop")
+        self.preview_combo.setToolTip(
+            "构图预览直接读取源视频并按源帧率播放；最终分辨率和插帧在导出时生成。"
+        )
         self.preview_combo.currentIndexChanged.connect(self._preview_mode_changed)
 
-        header_layout.addLayout(title_stack)
+        header_layout.addWidget(monitor_title)
         header_layout.addStretch()
         header_layout.addWidget(self.video_meta_label)
         header_layout.addWidget(self.preview_combo)
@@ -265,12 +272,17 @@ class MainWindow(QMainWindow):
         layout.addWidget(transport)
         return card
 
-    def _build_inspector(self) -> QScrollArea:
+    def _build_inspector(self) -> QWidget:
+        panel = QWidget()
+        panel.setFixedWidth(372)
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(10)
+
         scroll = QScrollArea()
         scroll.setObjectName("inspectorScroll")
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setFixedWidth(372)
 
         content = QWidget()
         layout = QVBoxLayout(content)
@@ -280,29 +292,30 @@ class MainWindow(QMainWindow):
         intro = QFrame()
         intro.setObjectName("inspectorCard")
         intro_layout = QVBoxLayout(intro)
-        intro_layout.setContentsMargins(16, 15, 16, 13)
-        intro_layout.setSpacing(4)
-        intro_eyebrow = QLabel("CONTROL ROOM")
-        intro_eyebrow.setObjectName("eyebrow")
-        intro_title = QLabel("自动跟拍工作台")
-        intro_title.setObjectName("panelTitle")
-        intro_copy = QLabel("指定一个舞者，让镜头路径在整段视频中持续跟随。")
-        intro_copy.setObjectName("muted")
-        intro_copy.setWordWrap(True)
+        intro_layout.setContentsMargins(14, 12, 14, 12)
+        intro_layout.setSpacing(8)
         self.workflow = WorkflowIndicator(["导入", "跟踪", "预览", "导出"])
-        intro_layout.addWidget(intro_eyebrow)
-        intro_layout.addWidget(intro_title)
-        intro_layout.addWidget(intro_copy)
-        intro_layout.addWidget(self.workflow)
+        self.workflow.hide()
+        self.inspector_tabs = SegmentedControl()
+        self.inspector_tabs.addItem("准备", "prepare")
+        self.inspector_tabs.addItem("调整", "adjust")
+        self.inspector_tabs.addItem("导出", "export")
+        self.inspector_tabs.setItemEnabled(1, False)
+        self.inspector_tabs.setItemEnabled(2, False)
+        self.inspector_tabs.currentIndexChanged.connect(
+            self._inspector_stage_changed
+        )
+        intro_layout.addWidget(self.inspector_tabs)
         layout.addWidget(intro)
 
-        media_card, media_layout = self._section_card("CLIP", "素材")
+        self.media_card, media_layout = self._section_card("", "素材与项目")
         self.source_info = QLabel("尚未导入视频")
         self.source_info.setObjectName("sourceInfo")
         self.source_info.setWordWrap(True)
         self.open_button = MotionButton("导入舞蹈视频", "secondary")
         self.open_button.clicked.connect(self._open_video)
         project_buttons = QHBoxLayout()
+        history_buttons = QHBoxLayout()
         self.save_project_button = MotionButton("保存项目", "ghost")
         self.save_project_button.clicked.connect(self._save_project_now)
         self.save_project_button.setEnabled(False)
@@ -316,15 +329,16 @@ class MainWindow(QMainWindow):
         self.redo_button.setEnabled(False)
         project_buttons.addWidget(self.save_project_button)
         project_buttons.addWidget(self.open_project_button)
-        project_buttons.addWidget(self.undo_button)
-        project_buttons.addWidget(self.redo_button)
+        history_buttons.addWidget(self.undo_button)
+        history_buttons.addWidget(self.redo_button)
         media_layout.addWidget(self.source_info)
         media_layout.addWidget(self.open_button)
         media_layout.addLayout(project_buttons)
-        layout.addWidget(media_card)
+        media_layout.addLayout(history_buttons)
+        layout.addWidget(self.media_card)
 
-        tracking_card, tracking_layout = self._section_card("01 · SUBJECT", "锁定舞者")
-        tracking_copy = QLabel("在第一帧拖框完整包住目标。SAM 2 会传播人物掩码并保持遮挡记忆。")
+        self.tracking_card, tracking_layout = self._section_card("", "选择舞者")
+        tracking_copy = QLabel("在第一帧完整框住要跟随的舞者，然后开始自动跟踪。")
         tracking_copy.setObjectName("muted")
         tracking_copy.setWordWrap(True)
         self.analyze_button = MotionButton("运行 SAM 2 跟踪", "accent")
@@ -348,9 +362,9 @@ class MainWindow(QMainWindow):
         tracking_layout.addWidget(self.analyze_button)
         tracking_layout.addLayout(correction_buttons)
         tracking_layout.addWidget(self.cancel_operation_button)
-        layout.addWidget(tracking_card)
+        layout.addWidget(self.tracking_card)
 
-        framing_card, framing_layout = self._section_card("02 · FRAME", "输出构图")
+        self.framing_card, framing_layout = self._section_card("", "构图与镜头")
         ratio_label = QLabel("画幅比例")
         ratio_label.setObjectName("muted")
         self.ratio_combo = SegmentedControl()
@@ -435,37 +449,45 @@ class MainWindow(QMainWindow):
         framing_layout.addWidget(self.ratio_combo)
         framing_layout.addWidget(stabilization_label)
         framing_layout.addWidget(self.stabilization_combo)
-        framing_layout.addLayout(smoothing_header)
-        framing_layout.addWidget(self.smoothing_slider)
-        framing_layout.addLayout(auto_zoom_header)
-        framing_layout.addLayout(max_zoom_header)
-        framing_layout.addWidget(self.max_zoom_slider)
         self.reset_framing_button = MotionButton("恢复构图默认", "ghost")
         self.reset_framing_button.clicked.connect(self._reset_framing_controls)
-        framing_layout.addWidget(self.reset_framing_button)
-        layout.addWidget(framing_card)
 
-        keyframe_card, keyframe_layout = self._section_card(
-            "KEYFRAMES", "镜头关键帧"
-        )
-        keyframe_copy = QLabel(
-            "拖动会立即预览，播放时保持生效；确认后写入对应帧。蓝点会显示在时间轴上。"
-        )
+        self.advanced_button = MotionButton("显示高级调整", "ghost")
+        self.advanced_button.setCheckable(True)
+        self.advanced_button.toggled.connect(self._toggle_advanced_controls)
+        framing_layout.addWidget(self.advanced_button)
+
+        self.advanced_panel = QFrame()
+        self.advanced_panel.setObjectName("advancedPanel")
+        advanced_layout = QVBoxLayout(self.advanced_panel)
+        advanced_layout.setContentsMargins(13, 12, 13, 13)
+        advanced_layout.setSpacing(9)
+        advanced_layout.addLayout(smoothing_header)
+        advanced_layout.addWidget(self.smoothing_slider)
+        advanced_layout.addLayout(auto_zoom_header)
+        advanced_layout.addLayout(max_zoom_header)
+        advanced_layout.addWidget(self.max_zoom_slider)
+        advanced_layout.addWidget(self.reset_framing_button)
+
+        keyframe_title = QLabel("镜头关键帧")
+        keyframe_title.setObjectName("sectionTitle")
+        keyframe_copy = QLabel("调整当前帧的位置、缩放和自动跟随。")
         keyframe_copy.setObjectName("muted")
         keyframe_copy.setWordWrap(True)
-        keyframe_layout.addWidget(keyframe_copy)
+        advanced_layout.addWidget(keyframe_title)
+        advanced_layout.addWidget(keyframe_copy)
 
         self.keyframe_x_slider, self.keyframe_x_value = self._labeled_slider(
-            keyframe_layout, "水平位置", -240, 240, 0, "0 px"
+            advanced_layout, "水平位置", -240, 240, 0, "0 px"
         )
         self.keyframe_y_slider, self.keyframe_y_value = self._labeled_slider(
-            keyframe_layout, "垂直位置", -180, 180, 0, "0 px"
+            advanced_layout, "垂直位置", -180, 180, 0, "0 px"
         )
         self.keyframe_zoom_slider, self.keyframe_zoom_value = self._labeled_slider(
-            keyframe_layout, "缩放", 100, 250, 100, "1.00×"
+            advanced_layout, "缩放", 100, 250, 100, "1.00×"
         )
         self.keyframe_follow_slider, self.keyframe_follow_value = self._labeled_slider(
-            keyframe_layout, "自动跟随", 0, 100, 0, "0%"
+            advanced_layout, "自动跟随", 0, 100, 0, "0%"
         )
         for slider in (
             self.keyframe_x_slider,
@@ -483,17 +505,66 @@ class MainWindow(QMainWindow):
         self.remove_keyframe_button.setEnabled(False)
         keyframe_buttons.addWidget(self.add_keyframe_button, 1)
         keyframe_buttons.addWidget(self.remove_keyframe_button)
-        keyframe_layout.addLayout(keyframe_buttons)
+        advanced_layout.addLayout(keyframe_buttons)
         self.reset_keyframe_button = MotionButton("恢复关键帧参数", "ghost")
         self.reset_keyframe_button.clicked.connect(self._reset_keyframe_controls)
         self.reset_keyframe_button.setEnabled(False)
-        keyframe_layout.addWidget(self.reset_keyframe_button)
-        layout.addWidget(keyframe_card)
+        advanced_layout.addWidget(self.reset_keyframe_button)
+        self.advanced_panel.hide()
+        framing_layout.addWidget(self.advanced_panel)
+        layout.addWidget(self.framing_card)
 
-        output_card, output_layout = self._section_card("03 · OUTPUT", "检查与交付")
-        output_copy = QLabel("预览确认后编码为兼容 MP4，并复用原始音频。")
+        self.output_card, output_layout = self._section_card("", "导出成片")
+        output_copy = QLabel("直接读取源视频，以高质量 H.264 编码并保留音频。")
         output_copy.setObjectName("muted")
         output_copy.setWordWrap(True)
+
+        quality_label = QLabel("画质")
+        quality_label.setObjectName("muted")
+        self.export_quality_combo = SegmentedControl()
+        self.export_quality_combo.addItem("高画质", ExportQuality.HIGH)
+        self.export_quality_combo.addItem("标准", ExportQuality.STANDARD)
+        self.export_quality_combo.addItem("小体积", ExportQuality.SMALL)
+
+        resolution_label = QLabel("分辨率")
+        resolution_label.setObjectName("muted")
+        self.export_resolution_combo = SegmentedControl()
+        self.export_resolution_combo.addItem("原生", ExportResolution.NATIVE)
+        self.export_resolution_combo.addItem("720p", ExportResolution.P720)
+        self.export_resolution_combo.addItem("1080p", ExportResolution.P1080)
+
+        frame_rate_label = QLabel("输出帧率")
+        frame_rate_label.setObjectName("muted")
+        self.export_frame_rate_combo = SegmentedControl()
+        self.export_frame_rate_combo.addItem("源帧率", ExportFrameRate.SOURCE)
+        self.export_frame_rate_combo.addItem("30 FPS", ExportFrameRate.FPS_30)
+        self.export_frame_rate_combo.addItem("60 FPS", ExportFrameRate.FPS_60)
+
+        self.interpolation_row = QWidget()
+        interpolation_layout = QHBoxLayout(self.interpolation_row)
+        interpolation_layout.setContentsMargins(0, 0, 0, 0)
+        interpolation_label = QLabel("流畅插帧")
+        interpolation_label.setObjectName("muted")
+        self.interpolation_combo = SegmentedControl()
+        self.interpolation_combo.setFixedWidth(138)
+        self.interpolation_combo.addItem("关闭", False)
+        self.interpolation_combo.addItem("开启", True)
+        interpolation_layout.addWidget(interpolation_label)
+        interpolation_layout.addStretch()
+        interpolation_layout.addWidget(self.interpolation_combo)
+        self.interpolation_row.hide()
+
+        for control in (
+            self.export_quality_combo,
+            self.export_resolution_combo,
+            self.export_frame_rate_combo,
+            self.interpolation_combo,
+        ):
+            control.currentIndexChanged.connect(self._export_settings_changed)
+
+        self.export_summary = QLabel("完成跟踪后显示最终输出规格。")
+        self.export_summary.setObjectName("muted")
+        self.export_summary.setWordWrap(True)
         self.export_button = MotionButton("导出跟拍成片", "accent")
         self.export_button.clicked.connect(self._export)
         self.export_button.setEnabled(False)
@@ -501,17 +572,24 @@ class MainWindow(QMainWindow):
         self.open_export_button.clicked.connect(self._open_exported_video)
         self.open_export_button.setEnabled(False)
         output_layout.addWidget(output_copy)
+        output_layout.addWidget(quality_label)
+        output_layout.addWidget(self.export_quality_combo)
+        output_layout.addWidget(resolution_label)
+        output_layout.addWidget(self.export_resolution_combo)
+        output_layout.addWidget(frame_rate_label)
+        output_layout.addWidget(self.export_frame_rate_combo)
+        output_layout.addWidget(self.interpolation_row)
+        output_layout.addWidget(self.export_summary)
         output_layout.addWidget(self.export_button)
         output_layout.addWidget(self.open_export_button)
-        layout.addWidget(output_card)
+        layout.addWidget(self.output_card)
+        layout.addStretch()
 
-        status_card = QFrame()
-        status_card.setObjectName("statusCard")
-        status_layout = QVBoxLayout(status_card)
-        status_layout.setContentsMargins(15, 13, 15, 13)
-        status_layout.setSpacing(9)
-        status_eyebrow = QLabel("SYSTEM STATUS")
-        status_eyebrow.setObjectName("eyebrow")
+        self.status_card = QFrame()
+        self.status_card.setObjectName("statusCard")
+        status_layout = QVBoxLayout(self.status_card)
+        status_layout.setContentsMargins(13, 11, 13, 11)
+        status_layout.setSpacing(7)
         self.status_label = AnimatedStatusLabel("导入视频后，在第一帧框选要跟随的舞者。")
         self.status_label.setObjectName("muted")
         self.progress = QProgressBar()
@@ -519,35 +597,135 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self.progress.setTextVisible(False)
         self.progress.hide()
-        log_button = MotionButton("查看运行日志", "ghost")
-        log_button.clicked.connect(self._open_log)
-        status_layout.addWidget(status_eyebrow)
+        self.log_button = MotionButton("运行日志", "ghost")
+        self.log_button.clicked.connect(self._open_log)
         status_layout.addWidget(self.status_label)
         status_layout.addWidget(self.progress)
-        status_layout.addWidget(log_button)
-        layout.addWidget(status_card)
-        layout.addStretch()
+        status_layout.addWidget(self.log_button)
 
         scroll.setWidget(content)
-        return scroll
+        panel_layout.addWidget(scroll, 1)
+        panel_layout.addWidget(self.status_card)
+        self._inspector_stage_changed(0)
+        return panel
 
     @staticmethod
-    def _section_card(number: str, title: str) -> tuple[QFrame, QVBoxLayout]:
+    def _section_card(_number: str, title: str) -> tuple[QFrame, QVBoxLayout]:
         card = QFrame()
         card.setObjectName("sectionCard")
         layout = QVBoxLayout(card)
         layout.setContentsMargins(15, 13, 15, 14)
         layout.setSpacing(10)
-        heading = QHBoxLayout()
-        number_label = QLabel(number)
-        number_label.setObjectName("sectionNumber")
         title_label = QLabel(title)
         title_label.setObjectName("sectionTitle")
-        heading.addWidget(number_label)
-        heading.addStretch()
-        heading.addWidget(title_label)
-        layout.addLayout(heading)
+        layout.addWidget(title_label)
         return card, layout
+
+    def _inspector_stage_changed(self, index: int) -> None:
+        self.media_card.setVisible(index == 0)
+        self.tracking_card.setVisible(index == 0)
+        self.framing_card.setVisible(index == 1)
+        self.output_card.setVisible(index == 2)
+
+    def _set_inspector_stage(self, index: int) -> None:
+        if self.inspector_tabs.currentIndex() == index:
+            self._inspector_stage_changed(index)
+        else:
+            self.inspector_tabs.setCurrentIndex(index)
+
+    def _update_inspector_navigation(self) -> None:
+        has_tracking = self.tracking_result is not None
+        self.inspector_tabs.setItemEnabled(1, has_tracking)
+        self.inspector_tabs.setItemEnabled(
+            2, has_tracking and self.camera_path is not None
+        )
+
+    def _toggle_advanced_controls(self, visible: bool) -> None:
+        self.advanced_panel.setVisible(visible)
+        self.advanced_button.setText(
+            "收起高级调整" if visible else "显示高级调整"
+        )
+
+    def _export_settings(self) -> ExportSettings:
+        return ExportSettings(
+            quality=ExportQuality(self.export_quality_combo.currentData()),
+            resolution=ExportResolution(self.export_resolution_combo.currentData()),
+            frame_rate=ExportFrameRate(self.export_frame_rate_combo.currentData()),
+            interpolate=bool(self.interpolation_combo.currentData()),
+        )
+
+    def _apply_export_settings(self, settings: ExportSettings) -> None:
+        controls = (
+            self.export_quality_combo,
+            self.export_resolution_combo,
+            self.export_frame_rate_combo,
+            self.interpolation_combo,
+        )
+        for control in controls:
+            control.blockSignals(True)
+        try:
+            self.export_quality_combo.setCurrentIndex(
+                list(ExportQuality).index(settings.quality)
+            )
+            self.export_resolution_combo.setCurrentIndex(
+                list(ExportResolution).index(settings.resolution)
+            )
+            self.export_frame_rate_combo.setCurrentIndex(
+                list(ExportFrameRate).index(settings.frame_rate)
+            )
+            self.interpolation_combo.setCurrentIndex(1 if settings.interpolate else 0)
+        finally:
+            for control in controls:
+                control.blockSignals(False)
+        self._export_settings_changed()
+
+    def _export_settings_changed(self, _index: int = 0) -> None:
+        settings = self._export_settings()
+        show_interpolation = settings.frame_rate is ExportFrameRate.FPS_60
+        self.interpolation_row.setVisible(show_interpolation)
+        if self.camera_path is None or self.video_info is None:
+            self.export_summary.setText("完成跟踪后显示最终输出规格。")
+        else:
+            width, height = resolve_output_size(
+                self.camera_path.output_size, settings.resolution
+            )
+            fps = output_frame_rate(self.video_info.fps, settings.frame_rate)
+            interpolation = (
+                " · 运动插帧"
+                if show_interpolation
+                and settings.interpolate
+                and self.video_info.fps < 60
+                else ""
+            )
+            enlarged = (
+                width > self.camera_path.output_size[0]
+                or height > self.camera_path.output_size[1]
+            )
+            warning = " · 将高质量放大" if enlarged else ""
+            self.export_summary.setText(
+                f"{width} × {height} · {fps:.2f} FPS{interpolation}{warning}"
+            )
+        self._update_video_meta()
+        self._schedule_autosave()
+
+    def _update_video_meta(self) -> None:
+        if self.video_info is None:
+            self.video_meta_label.setText("— × —  /  — FPS")
+            return
+        info = self.video_info
+        if self.preview_combo.currentData() != "crop" or self.camera_path is None:
+            self.video_meta_label.setText(
+                f"{info.width} × {info.height}  /  {info.fps:.2f} FPS"
+            )
+            return
+        settings = self._export_settings()
+        width, height = resolve_output_size(
+            self.camera_path.output_size, settings.resolution
+        )
+        target_fps = output_frame_rate(info.fps, settings.frame_rate)
+        self.video_meta_label.setText(
+            f"预览 {info.fps:.2f} FPS  /  导出 {width}×{height} · {target_fps:.2f} FPS"
+        )
 
     @staticmethod
     def _labeled_slider(
@@ -704,6 +882,7 @@ class MainWindow(QMainWindow):
             self.frame_slider.set_subject_corrections(self.keyframes)
             self._update_keyframe_editor()
             self._update_subject_correction_controls()
+            self._update_inspector_navigation()
             self._show_current_frame()
             self._schedule_autosave()
         finally:
@@ -798,14 +977,18 @@ class MainWindow(QMainWindow):
             except Exception as error:
                 logging.warning("Could not restore video project: %s", error)
         self.project_document = project or ProjectDocument(source=source_ref(info))
+        if project is None:
+            self._apply_export_settings(ExportSettings())
 
-        self.project_label.setText(info.path.name.upper())
-        self.video_meta_label.setText(f"{info.width} × {info.height}  /  {info.fps:.2f} FPS")
+        self.project_label.setText(info.path.name)
+        self._update_video_meta()
         self.source_info.setText(
             f"{info.path.name}\n{self._format_time(info.duration)} · "
             f"{info.width}×{info.height} · {info.frame_count} 帧"
         )
         self.workflow.setStep(1)
+        self._update_inspector_navigation()
+        self._set_inspector_stage(0)
         if project is not None:
             self._apply_project(project)
             self.status_label.setText("项目已恢复，跟踪结果和镜头编辑无需重新计算。")
@@ -837,6 +1020,7 @@ class MainWindow(QMainWindow):
                 document.tracking.boxes if document.tracking is not None else []
             )
             self.camera_path = document.camera_path
+            self._apply_export_settings(document.export_settings)
             self.crop_path = (
                 list(document.camera_path.frames)
                 if document.camera_path is not None
@@ -865,6 +1049,7 @@ class MainWindow(QMainWindow):
                 self.frame_slider.set_tracking_quality(self.tracking_result.samples)
                 self.preview_combo.setCurrentIndex(1)
                 self.workflow.setStep(2)
+                self._set_inspector_stage(1)
                 self.export_button.setEnabled(bool(self.crop_path))
                 self.add_keyframe_button.setEnabled(True)
                 self.reset_keyframe_button.setEnabled(True)
@@ -905,6 +1090,7 @@ class MainWindow(QMainWindow):
         self.project_document.framing = self._framing_settings()
         self.project_document.camera_keyframes = list(self.camera_keyframes)
         self.project_document.camera_path = self.camera_path
+        self.project_document.export_settings = self._export_settings()
         self.project_document.playhead_frame = self.current_frame_index
         return self.project_document
 
@@ -985,6 +1171,8 @@ class MainWindow(QMainWindow):
         self.previous_issue_button.setEnabled(False)
         self.next_issue_button.setEnabled(False)
         self.workflow.setStep(1)
+        self._update_inspector_navigation()
+        self._set_inspector_stage(0)
         self.status_label.setText(message)
         self._show_current_frame()
         self._schedule_autosave()
@@ -1058,6 +1246,7 @@ class MainWindow(QMainWindow):
         self.frame_slider.set_tracking_quality(result.samples)
         self._rebuild_crop_path()
         self.preview_combo.setCurrentIndex(1)
+        self._set_inspector_stage(1)
         self._update_subject_correction_controls()
         if edit_before is not None:
             self._record_history("修正人物跟踪", edit_before)
@@ -1116,6 +1305,7 @@ class MainWindow(QMainWindow):
         self._rebuild_crop_path()
         self.preview_combo.setCurrentIndex(1)
         self.workflow.setStep(2)
+        self._set_inspector_stage(1)
         flagged = sum(
             sample.tracking_confidence < 0.42 for sample in result.samples
         )
@@ -1124,7 +1314,7 @@ class MainWindow(QMainWindow):
                 f"智能分析完成，时间轴标出 {flagged} 个低质量帧。优先检查红色和橙色区域。"
             )
         else:
-            self.status_label.setText("姿态与身份分析完成。已进入自动缩放成片预览。")
+            self.status_label.setText("姿态与身份分析完成。已进入自动缩放构图预览。")
         self.export_button.setEnabled(True)
         self.add_keyframe_button.setEnabled(True)
         self.reset_keyframe_button.setEnabled(True)
@@ -1149,6 +1339,8 @@ class MainWindow(QMainWindow):
             self._preview_keyframe = None
             self._preview_camera_path = None
             self.crop_path = list(self.camera_path.frames)
+            self._update_inspector_navigation()
+            self._export_settings_changed()
             self.export_button.setEnabled(not self.busy)
         except Exception as error:
             self._operation_error(str(error))
@@ -1453,7 +1645,21 @@ class MainWindow(QMainWindow):
 
     def _preview_mode_changed(self) -> None:
         self._update_play_button_text()
+        self._update_video_meta()
         self._show_current_frame()
+        if (
+            self.preview_combo.currentData() == "crop"
+            and self.video_info is not None
+            and self.camera_path is not None
+        ):
+            target_fps = output_frame_rate(
+                self.video_info.fps, self._export_settings().frame_rate
+            )
+            if abs(target_fps - self.video_info.fps) > 0.01:
+                self.status_label.setText(
+                    f"构图预览按源视频 {self.video_info.fps:.2f} FPS 播放；"
+                    f"最终 {target_fps:.2f} FPS 在导出时生成。"
+                )
         animation = animate_refresh(self.canvas)
         if animation is not None:
             self._motion_animations.append(animation)
@@ -1504,11 +1710,6 @@ class MainWindow(QMainWindow):
     def _read_preview_frame(self, frame_index: int):
         if self.video_info is None:
             return None
-        frames_dir = cached_frames_dir(self.video_info)
-        if frames_dir is not None:
-            cached = cv2.imread(str(frames_dir / f"{frame_index:06d}.jpg"))
-            if cached is not None:
-                return cached
         if self.preview_capture is None or not self.preview_capture.isOpened():
             self.preview_capture = cv2.VideoCapture(str(self.video_info.path))
         expected_position = int(round(self.preview_capture.get(cv2.CAP_PROP_POS_FRAMES)))
@@ -1533,7 +1734,7 @@ class MainWindow(QMainWindow):
         interval = max(1, round(1000 / self.video_info.fps))
         self.play_timer.start(interval)
         self.play_button.setText("暂停")
-        mode = "成片" if self.preview_combo.currentData() == "crop" else "原片"
+        mode = "构图" if self.preview_combo.currentData() == "crop" else "原片"
         self.status_label.setText(f"正在播放{mode}。空格键可快速暂停。")
         logging.info("Playback started: mode=%s frame=%d", mode, self.current_frame_index)
 
@@ -1546,7 +1747,7 @@ class MainWindow(QMainWindow):
         if self.play_timer.isActive():
             self.play_button.setText("暂停")
         elif self.preview_combo.currentData() == "crop" and self.crop_path:
-            self.play_button.setText("播放成片")
+            self.play_button.setText("播放构图")
         else:
             self.play_button.setText("播放原片")
 
@@ -1627,8 +1828,15 @@ class MainWindow(QMainWindow):
             path += ".mp4"
 
         self.workflow.setStep(3)
+        self._set_inspector_stage(2)
         self._set_busy(True, "正在编码兼容 MP4、复用原音频并验证输出文件。")
-        worker = FunctionWorker(export_video, self.video_info, self.camera_path, path)
+        worker = FunctionWorker(
+            export_video,
+            self.video_info,
+            self.camera_path,
+            path,
+            settings=self._export_settings(),
+        )
         worker.signals.progress.connect(self.progress.setValue)
         worker.signals.result.connect(self._export_complete)
         worker.signals.error.connect(self._operation_error)
@@ -1699,6 +1907,10 @@ class MainWindow(QMainWindow):
         self.smoothing_slider.setEnabled(not busy)
         self.auto_zoom_combo.setEnabled(not busy)
         self.max_zoom_slider.setEnabled(not busy)
+        self.export_quality_combo.setEnabled(not busy)
+        self.export_resolution_combo.setEnabled(not busy)
+        self.export_frame_rate_combo.setEnabled(not busy)
+        self.interpolation_combo.setEnabled(not busy)
         self.reset_framing_button.setEnabled(not busy)
         self.preview_combo.setEnabled(not busy)
         self.cancel_operation_button.setVisible(busy)
@@ -1756,9 +1968,6 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Dance Focus")
     app.setStyle("Fusion")
-    palette = app.palette()
-    palette.setColor(QPalette.ColorRole.Window, Qt.GlobalColor.black)
-    app.setPalette(palette)
     window = MainWindow()
     window.show()
     return app.exec()

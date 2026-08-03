@@ -38,6 +38,8 @@ def test_segmented_control_tracks_text_data_and_selection(app):
     assert control.currentData() == "crop"
     assert changes == [1]
     assert control._indicator.geometry().width() > 0
+    control.setItemEnabled(1, False)
+    assert not control.isItemEnabled(1)
     control.close()
 
 

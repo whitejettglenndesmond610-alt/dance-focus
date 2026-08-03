@@ -9,6 +9,12 @@ from pathlib import Path
 import shutil
 import uuid
 
+from dance_focus.exporter import (
+    ExportFrameRate,
+    ExportQuality,
+    ExportResolution,
+    ExportSettings,
+)
 from dance_focus.geometry import (
     Box,
     CameraKeyframe,
@@ -25,7 +31,7 @@ from dance_focus.geometry import (
 from dance_focus.video import VideoInfo
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -51,6 +57,7 @@ class ProjectDocument:
     )
     camera_keyframes: list[CameraKeyframe] = field(default_factory=list)
     camera_path: CameraPath | None = None
+    export_settings: ExportSettings = field(default_factory=ExportSettings)
     playhead_frame: int = 0
     updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
@@ -192,13 +199,19 @@ def document_to_dict(document: ProjectDocument) -> dict:
             for keyframe in document.camera_keyframes
         ],
         "camera_path": camera_path,
+        "export_settings": {
+            "quality": document.export_settings.quality.value,
+            "resolution": document.export_settings.resolution.value,
+            "frame_rate": document.export_settings.frame_rate.value,
+            "interpolate": document.export_settings.interpolate,
+        },
         "playhead_frame": document.playhead_frame,
     }
 
 
 def document_from_dict(data: dict) -> ProjectDocument:
     schema_version = int(data.get("schema_version", 0))
-    if schema_version not in {1, SCHEMA_VERSION}:
+    if schema_version not in {1, 2, SCHEMA_VERSION}:
         raise ValueError(f"不支持的项目版本：{schema_version}")
     source_data = data["source"]
     source = SourceRef(
@@ -283,6 +296,13 @@ def document_from_dict(data: dict) -> ProjectDocument:
     tracking_prompt_hash = data.get("tracking_prompt_hash")
     if tracking is not None and tracking_prompt_hash is None:
         tracking_prompt_hash = subject_prompt_hash(subject_prompts)
+    export_data = data.get("export_settings", {})
+    export_settings = ExportSettings(
+        quality=ExportQuality(export_data.get("quality", "high")),
+        resolution=ExportResolution(export_data.get("resolution", "native")),
+        frame_rate=ExportFrameRate(export_data.get("frame_rate", "source")),
+        interpolate=bool(export_data.get("interpolate", False)),
+    )
 
     return ProjectDocument(
         source=source,
@@ -306,6 +326,7 @@ def document_from_dict(data: dict) -> ProjectDocument:
             for item in data.get("camera_keyframes", [])
         ],
         camera_path=camera_path,
+        export_settings=export_settings,
         playhead_frame=int(data.get("playhead_frame", 0)),
         updated_at=str(data.get("updated_at", datetime.now(UTC).isoformat())),
     )

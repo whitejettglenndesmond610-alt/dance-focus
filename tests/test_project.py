@@ -1,5 +1,11 @@
 from pathlib import Path
 
+from dance_focus.exporter import (
+    ExportFrameRate,
+    ExportQuality,
+    ExportResolution,
+    ExportSettings,
+)
 from dance_focus.geometry import (
     Box,
     CameraKeyframe,
@@ -43,6 +49,12 @@ def test_project_round_trip_preserves_expensive_results(tmp_path: Path):
         (404, 720),
         (CropRect(0, 0, 404, 720), CropRect(20, 10, 300, 534)),
     )
+    document.export_settings = ExportSettings(
+        ExportQuality.STANDARD,
+        ExportResolution.P1080,
+        ExportFrameRate.FPS_60,
+        True,
+    )
     store = ProjectStore(tmp_path / "state")
 
     path = store.save(document)
@@ -54,6 +66,7 @@ def test_project_round_trip_preserves_expensive_results(tmp_path: Path):
     assert restored.tracking_prompt_hash == document.tracking_prompt_hash
     assert restored.camera_keyframes == document.camera_keyframes
     assert restored.camera_path == document.camera_path
+    assert restored.export_settings == document.export_settings
 
 
 def test_project_store_recovers_previous_backup(tmp_path: Path):
@@ -106,3 +119,17 @@ def test_schema_one_project_migrates_with_prompt_hash(tmp_path: Path):
     assert restored.tracking_prompt_hash == subject_prompt_hash(
         restored.subject_prompts
     )
+
+
+def test_schema_two_project_uses_compatible_export_defaults(tmp_path: Path):
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"fake video content")
+    info = VideoInfo(video, 640, 360, 30.0, 1)
+    payload = document_to_dict(ProjectDocument(source=source_ref(info)))
+    payload["schema_version"] = 2
+    payload.pop("export_settings")
+
+    restored = document_from_dict(payload)
+
+    assert restored.schema_version == SCHEMA_VERSION
+    assert restored.export_settings == ExportSettings()
